@@ -6,7 +6,8 @@ export class RateLimiter {
   private maxRequests: number;
   private timeWindow: number;
 
-  constructor(maxRequests: number = 1000, timeWindow: number = 60000) { // 1000 requests per minute for local usage
+  constructor(maxRequests: number = 1000, timeWindow: number = 60000) {
+    // 1000 requests per minute for local usage
     this.maxRequests = maxRequests;
     this.timeWindow = timeWindow;
   }
@@ -14,10 +15,12 @@ export class RateLimiter {
   checkLimit(clientId: string): boolean {
     const now = Date.now();
     const timestamps = this.requests.get(clientId) || [];
-    
+
     // Remove old timestamps
-    const validTimestamps = timestamps.filter(time => now - time < this.timeWindow);
-    
+    const validTimestamps = timestamps.filter(
+      (time) => now - time < this.timeWindow
+    );
+
     if (validTimestamps.length >= this.maxRequests) {
       return false;
     }
@@ -45,13 +48,21 @@ export function validateMessageSize(message: any): void {
 export class ConnectionMonitor {
   private lastActivity: number = Date.now();
   private healthCheckInterval: NodeJS.Timeout | null = null;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
   private readonly timeout: number;
   private readonly gracePeriod: number;
+  private readonly heartbeat: number;
   private initialized: boolean = false;
 
-  constructor(timeout: number = 60000, gracePeriod: number = 30000) { // 60s timeout, 30s grace period
+  constructor(
+    timeout: number = 300000,
+    gracePeriod: number = 60000,
+    heartbeat: number = 30000
+  ) {
+    // 5min timeout, 1min grace period, 30s heartbeat
     this.timeout = timeout;
     this.gracePeriod = gracePeriod;
+    this.heartbeat = heartbeat;
   }
 
   updateActivity() {
@@ -62,8 +73,19 @@ export class ConnectionMonitor {
     // Start monitoring after grace period
     setTimeout(() => {
       this.initialized = true;
+
+      // Set up heartbeat to keep connection alive
+      this.heartbeatInterval = setInterval(() => {
+        // The heartbeat itself counts as activity
+        this.updateActivity();
+      }, this.heartbeat);
+
+      // Set up health check
       this.healthCheckInterval = setInterval(() => {
-        if (Date.now() - this.lastActivity > this.timeout) {
+        const now = Date.now();
+        const inactiveTime = now - this.lastActivity;
+
+        if (inactiveTime > this.timeout) {
           onTimeout();
         }
       }, 10000); // Check every 10 seconds
@@ -74,6 +96,11 @@ export class ConnectionMonitor {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
+    }
+
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
   }
 }
