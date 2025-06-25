@@ -11,6 +11,10 @@ import { createAddTagsTool } from "./tools/add-tags/index.js";
 import { createRemoveTagsTool } from "./tools/remove-tags/index.js";
 import { createRenameTagTool } from "./tools/rename-tag/index.js";
 import { createReadNoteTool } from "./tools/read-note/index.js";
+import { createCLCreateNoteTool, createCLSearchByStateTool, createCLUpdateStateTool } from "./enhanced/cl-tools/index.js";
+import { createCanvasCreateTool, createCanvasTemplateTool, createCanvasListTemplatesTool } from "./enhanced/canvas/index.js";
+import { createVaultScannerTool } from "./tools/vault-scanner-factory.js";
+import { createLinkRepairTool } from "./tools/vault-scanner/link-repair-tool.js";
 import { listVaultsPrompt } from "./prompts/list-vaults/index.js";
 import { registerPrompt } from "./utils/prompt-factory.js";
 import path from "path";
@@ -497,6 +501,60 @@ Examples:
         console.error(`Error registering tool ${tool.name}:`, error);
         throw error;
       }
+    }
+
+    // Register enhanced CL tools with atomic filesystem operations
+    const enhancedTools = [
+      createCLCreateNoteTool(vaultsMap),
+      createCLSearchByStateTool(vaultsMap),
+      createCLUpdateStateTool(vaultsMap)
+    ];
+
+    for (const tool of enhancedTools) {
+      try {
+        server.registerTool(tool);
+        console.error(`Enhanced CL tool registered: ${tool.name}`);
+      } catch (error) {
+        console.error(`Error registering enhanced CL tool ${tool.name}:`, error);
+        throw error;
+      }
+    }
+
+    // Register canvas tools for visual knowledge management
+    const canvasTools = [
+      createCanvasCreateTool(vaultsMap),
+      createCanvasTemplateTool(vaultsMap),
+      createCanvasListTemplatesTool()
+    ];
+
+    for (const tool of canvasTools) {
+      try {
+        server.registerTool(tool);
+        console.error(`Canvas tool registered: ${tool.name}`);
+      } catch (error) {
+        console.error(`Error registering canvas tool ${tool.name}:`, error);
+        throw error;
+      }
+    }
+
+    // Register vault scanner tool for comprehensive vault analysis
+    try {
+      const vaultScannerTool = createVaultScannerTool(vaultsMap);
+      server.registerTool(vaultScannerTool);
+      console.error(`Vault scanner tool registered: ${vaultScannerTool.name}`);
+    } catch (error) {
+      console.error(`Error registering vault scanner tool:`, error);
+      throw error;
+    }
+
+    // Register link repair tool for link integrity management
+    try {
+      const linkRepairToolFactory = createLinkRepairTool(vaultsMap);
+      server.registerTool(linkRepairToolFactory);
+      console.error(`Link repair tool registered: link_repair`);
+    } catch (error) {
+      console.error(`Error registering link repair tool:`, error);
+      throw error;
     }
 
     // All prompts are registered in the server constructor

@@ -1,0 +1,729 @@
+/**
+ * Canvas MCP Tools
+ * MCP tool implementations for canvas creation and management
+ */
+
+import { z } from "zod";
+import { performance } from 'perf_hooks';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import type { CanvasGenerationResult, ObsidianCanvas } from './types.js';
+import { CLCanvasAnalyzer } from './cl-analyzer.js';
+import { CanvasWriter } from './writer.js';
+import { InteractiveCanvasGenerator, type InteractiveCanvasOptions } from './interactive/interactive-generator.js';
+import { InteractiveCanvasRenderer } from './interactive-renderer.js';
+import { createTool } from '../../utils/tool-factory.js';
+import { createToolResponse } from '../../utils/responses.js';
+
+// Canvas creation schema
+const canvasCreateSchema = z.object({
+  vault: z.string().min(1, "Vault name cannot be empty"),
+  name: z.string().min(1, "Canvas name cannot be empty"),
+  type: z.enum(['cl-network', 'project-timeline', 'decision-tree', 'topic-map', 'custom']),
+  options: z.object({
+    layoutAlgorithm: z.enum(['force-directed', 'hierarchical', 'circular', 'grid', 'timeline']).optional(),
+    includeStates: z.array(z.enum(['plasma', 'fluid', 'gel', 'crystal'])).optional(),
+    maxNodes: z.number().min(1).max(200).optional(),
+    projectPath: z.string().optional(),
+    rootNotePath: z.string().optional(),
+    colorScheme: z.enum(['cl-states', 'topics', 'confidence']).optional(),
+    spacing: z.number().optional(),
+    canvasWidth: z.number().optional(),
+    canvasHeight: z.number().optional()
+  }).optional()
+}).strict();
+
+// Interactive canvas schema
+const interactiveCanvasSchema = z.object({
+  vault: z.string().min(1, "Vault name cannot be empty"),
+  name: z.string().min(1, "Canvas name cannot be empty"),
+  type: z.enum(['cl-network', 'project-timeline', 'decision-tree', 'topic-map', 'custom']),
+  options: z.object({
+    layoutAlgorithm: z.enum(['force-directed', 'hierarchical', 'circular', 'grid', 'timeline']).optional(),
+    includeStates: z.array(z.enum(['plasma', 'fluid', 'gel', 'crystal'])).optional(),
+    maxNodes: z.number().min(1).max(200).optional(),
+    projectPath: z.string().optional(),
+    rootNotePath: z.string().optional(),
+    colorScheme: z.enum(['cl-states', 'topics', 'confidence']).optional(),
+    spacing: z.number().optional(),
+    canvasWidth: z.number().optional(),
+    canvasHeight: z.number().optional(),
+    // Interactive options
+    enableZoom: z.boolean().optional(),
+    enablePan: z.boolean().optional(),
+    enableDrag: z.boolean().optional(),
+    zoomExtent: z.tuple([z.number(), z.number()]).optional(),
+    initialZoom: z.number().optional()
+  }).optional()
+}).strict();
+
+// Template canvas schema
+const canvasTemplateSchema = z.object({
+  vault: z.string().min(1, "Vault name cannot be empty"),
+  name: z.string().min(1, "Canvas name cannot be empty"),
+  template: z.enum(['project-dashboard', 'knowledge-exploration', 'decision-analysis', 'topic-clusters']),
+  customOptions: z.object({
+    maxNodes: z.number().min(1).max(200).optional(),
+    projectPath: z.string().optional(),
+    rootNotePath: z.string().optional()
+  }).optional()
+}).strict();
+
+// Type aliases for inferred types
+type CanvasCreateArgs = z.infer<typeof canvasCreateSchema>;
+type CanvasTemplateArgs = z.infer<typeof canvasTemplateSchema>;
+type InteractiveCanvasArgs = z.infer<typeof interactiveCanvasSchema>;
+
+/**
+ * Create interactive canvas with D3.js-style features
+ */
+async function createInteractiveCanvas(
+  args: InteractiveCanvasArgs,
+  vaultPath: string,
+  vaultName: string
+): Promise<CanvasGenerationResult & { interactiveHtmlPath?: string }> {
+  const startTime = performance.now();
+  
+  try {
+    const analyzer = new CLCanvasAnalyzer(vaultPath);
+    const writer = new CanvasWriter(vaultPath);
+    
+    // Generate base canvas using existing logic
+    const baseResult = await createCanvas(args as CanvasCreateArgs, vaultPath, vaultName);
+    
+    // Create interactive HTML version
+    const canvas = await analyzer.generateCLNetworkCanvas({
+      includeStates: args.options?.includeStates || ['fluid', 'gel', 'crystal'],
+      maxNodes: args.options?.maxNodes || 50,
+      layoutAlgorithm: args.options?.layoutAlgorithm || 'force-directed',
+      groupByTopic: true
+    });
+    
+    // Generate interactive renderer
+    const interactiveRenderer = new InteractiveCanvasRenderer(canvas, {
+      enableZoom: args.options?.enableZoom ?? true,
+      enablePan: args.options?.enablePan ?? true,
+      enableDrag: args.options?.enableDrag ?? true,
+      zoomExtent: args.options?.zoomExtent || [0.1, 3.0],
+      initialZoom: args.options?.initialZoom || 1.0,
+      width: args.options?.canvasWidth || 2000,
+      height: args.options?.canvasHeight || 1500
+    });
+    
+    // Export interactive HTML
+    const interactiveHtmlPath = path.join(vaultPath, `${args.name}-interactive.html`);
+    await interactiveRenderer.exportInteractiveCanvas(interactiveHtmlPath);
+    
+    return {
+      ...baseResult,
+      interactiveHtmlPath,
+      processingTimeMs: performance.now() - startTime
+    };
+    
+  } catch (error) {
+    const processingTime = performance.now() - startTime;
+    throw new Error(`Interactive canvas creation failed after ${processingTime.toFixed(1)}ms: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+async function createCanvas(
+  args: CanvasCreateArgs,
+  vaultPath: string,
+  vaultName: string
+): Promise<CanvasGenerationResult> {
+  const startTime = performance.now();
+  
+  try {
+    const analyzer = new CLCanvasAnalyzer(vaultPath);
+    const writer = new CanvasWriter(vaultPath);
+    
+    // Check if canvas already exists
+    if (await writer.canvasExists(args.name)) {
+      throw new Error(`Canvas "${args.name}" already exists. Choose a different name or delete the existing canvas.`);
+    }
+    
+    let canvas: ObsidianCanvas;
+    
+    // Generate canvas based on type
+    switch (args.type) {
+      case 'cl-network':
+        canvas = await analyzer.generateCLNetworkCanvas({
+          includeStates: args.options?.includeStates || ['fluid', 'gel', 'crystal'],
+          maxNodes: args.options?.maxNodes || 50,
+          layoutAlgorithm: args.options?.layoutAlgorithm || 'force-directed',
+          groupByTopic: true
+        });
+        break;
+        
+      case 'project-timeline':
+        if (!args.options?.projectPath) {
+          throw new Error('Project path required for timeline canvas. Specify options.projectPath');
+        }
+        canvas = await analyzer.generateProjectTimeline(args.options.projectPath);
+        break;
+        
+      case 'decision-tree':
+        if (!args.options?.rootNotePath) {
+          throw new Error('Root note path required for decision tree canvas. Specify options.rootNotePath');
+        }
+        canvas = await analyzer.generateDecisionTree(args.options.rootNotePath);
+        break;
+        
+      case 'topic-map':
+        canvas = await analyzer.generateCLNetworkCanvas({
+          includeStates: args.options?.includeStates || ['gel', 'crystal'],
+          maxNodes: args.options?.maxNodes || 40,
+          layoutAlgorithm: 'circular',
+          groupByTopic: true
+        });
+        break;
+        
+      default:
+        throw new Error(`Canvas type "${args.type}" not yet implemented`);
+    }
+    
+    // Validate canvas structure
+    const validation = writer.validateCanvas(canvas);
+    if (!validation.valid) {
+      throw new Error(`Canvas validation failed: ${validation.errors.join(', ')}`);
+    }
+    
+    // Write canvas to file
+    const result = await writer.writeCanvas(canvas, args.name);
+    result.processingTimeMs = performance.now() - startTime;
+    result.layoutUsed = args.options?.layoutAlgorithm || 'force-directed';
+    
+    return result;
+    
+  } catch (error) {
+    const processingTime = performance.now() - startTime;
+    throw new Error(`Canvas creation failed after ${processingTime.toFixed(1)}ms: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Create canvas from predefined template
+ */
+async function createCanvasFromTemplate(
+  args: CanvasTemplateArgs,
+  vaultPath: string,
+  vaultName: string
+): Promise<CanvasGenerationResult> {
+  const startTime = performance.now();
+  
+  try {
+    const analyzer = new CLCanvasAnalyzer(vaultPath);
+    const writer = new CanvasWriter(vaultPath);
+    
+    // Check if canvas already exists
+    if (await writer.canvasExists(args.name)) {
+      throw new Error(`Canvas "${args.name}" already exists. Choose a different name or delete the existing canvas.`);
+    }
+    
+    let canvas: ObsidianCanvas;
+    
+    // Generate canvas based on template
+    switch (args.template) {
+      case 'project-dashboard':
+        // Comprehensive project overview
+        canvas = await analyzer.generateCLNetworkCanvas({
+          includeStates: ['gel', 'crystal'],
+          maxNodes: args.customOptions?.maxNodes || 30,
+          layoutAlgorithm: 'hierarchical',
+          groupByTopic: true
+        });
+        break;
+        
+      case 'knowledge-exploration':
+        // Active research and learning
+        canvas = await analyzer.generateCLNetworkCanvas({
+          includeStates: ['fluid', 'gel'],
+          maxNodes: args.customOptions?.maxNodes || 50,
+          layoutAlgorithm: 'force-directed',
+          groupByTopic: false
+        });
+        break;
+        
+      case 'decision-analysis':
+        // Decision trees and outcomes
+        if (!args.customOptions?.rootNotePath) {
+          throw new Error('Root note path required for decision analysis template. Specify customOptions.rootNotePath');
+        }
+        canvas = await analyzer.generateDecisionTree(args.customOptions.rootNotePath);
+        break;
+        
+      case 'topic-clusters':
+        // Subject-based knowledge groupings
+        canvas = await analyzer.generateCLNetworkCanvas({
+          includeStates: ['fluid', 'gel', 'crystal'],
+          maxNodes: args.customOptions?.maxNodes || 40,
+          layoutAlgorithm: 'circular',
+          groupByTopic: true
+        });
+        break;
+        
+      default:
+        throw new Error(`Template "${args.template}" not found`);
+    }
+    
+    // Validate and write canvas
+    const validation = writer.validateCanvas(canvas);
+    if (!validation.valid) {
+      throw new Error(`Canvas validation failed: ${validation.errors.join(', ')}`);
+    }
+    
+    const result = await writer.writeCanvas(canvas, args.name);
+    result.processingTimeMs = performance.now() - startTime;
+    result.layoutUsed = args.template;
+    
+    return result;
+    
+  } catch (error) {
+    const processingTime = performance.now() - startTime;
+    throw new Error(`Template canvas creation failed after ${processingTime.toFixed(1)}ms: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Create canvas creation MCP tool
+ */
+export function createCanvasCreateTool(vaults: Map<string, string>) {
+  return createTool<CanvasCreateArgs>({
+    name: "canvas_create",
+    description: `Create visual Obsidian canvas diagrams with intelligent layouts and CL methodology integration.
+
+Canvas Types:
+- cl-network: Complete knowledge graph with state-based coloring and relationship mapping
+- project-timeline: Chronological project progression with state evolution visualization  
+- decision-tree: Branching decision structures with outcome mapping
+- topic-map: Subject-based knowledge clustering with relationship visualization
+
+Layout Algorithms:
+- force-directed: Physics-based automatic positioning for natural clustering
+- hierarchical: Tree structures showing clear progression and dependencies
+- circular: Radial layout emphasizing central topics with connected knowledge
+- grid: Organized matrix positioning for systematic knowledge review
+- timeline: Chronological horizontal layout for project and decision progression
+
+Features:
+- Automatic CL state coloring (plasma=red, fluid=blue, gel=yellow, crystal=green)
+- Intelligent node sizing based on content and connections
+- Relationship-based edge styling and labeling
+- Performance optimized for large knowledge bases (up to 200 nodes)
+- Native Obsidian .canvas format for full compatibility
+
+Examples:
+- Knowledge graph: { "vault": "personal", "name": "knowledge-map", "type": "cl-network", "options": { "layoutAlgorithm": "force-directed", "maxNodes": 50, "includeStates": ["gel", "crystal"] } }
+- Project timeline: { "vault": "work", "name": "project-progress", "type": "project-timeline", "options": { "projectPath": "projects/ai-integration" } }
+- Decision analysis: { "vault": "personal", "name": "home-automation-decisions", "type": "decision-tree", "options": { "rootNotePath": "decisions/home-automation.md" } }
+- Topic clusters: { "vault": "research", "name": "topic-overview", "type": "topic-map", "options": { "layoutAlgorithm": "circular", "maxNodes": 40 } }`,
+    schema: canvasCreateSchema,
+    handler: async (args, vaultPath, vaultName) => {
+      const result = await createCanvas(args, vaultPath, vaultName);
+      
+      const response = {
+        success: true,
+        canvas: {
+          name: args.name,
+          type: args.type,
+          path: result.filePath,
+          nodeCount: result.nodeCount,
+          edgeCount: result.edgeCount,
+          layoutUsed: result.layoutUsed,
+          processingTimeMs: result.processingTimeMs
+        },
+        message: `Canvas "${args.name}" created successfully with ${result.nodeCount} nodes and ${result.edgeCount} edges using ${result.layoutUsed} layout. Processing time: ${result.processingTimeMs.toFixed(1)}ms`
+      };
+      
+      return createToolResponse(JSON.stringify(response, null, 2));
+    }
+  }, vaults);
+}
+
+/**
+ * Create canvas template MCP tool
+ */
+export function createCanvasTemplateTool(vaults: Map<string, string>) {
+  return createTool<CanvasTemplateArgs>({
+    name: "canvas_from_template",
+    description: `Create canvas from predefined templates optimized for common CL methodology use cases.
+
+Available Templates:
+- project-dashboard: Comprehensive project overview with timeline, dependencies, and status (gel+crystal states, hierarchical layout)
+- knowledge-exploration: Fluid and gel state notes for active research and learning (force-directed layout for discovery)
+- decision-analysis: Decision trees with outcomes and alternative paths (requires rootNotePath, hierarchical structure)
+- topic-clusters: Subject-based knowledge groupings with relationship mapping (circular layout, topic-grouped)
+
+Template Benefits:
+- Pre-configured layouts optimized for specific use cases
+- Intelligent state filtering for template purpose
+- Reduced complexity with sensible defaults
+- Educational examples of effective knowledge visualization
+
+Examples:
+- Project overview: { "vault": "work", "name": "current-projects", "template": "project-dashboard", "customOptions": { "maxNodes": 25 } }
+- Research exploration: { "vault": "research", "name": "active-learning", "template": "knowledge-exploration", "customOptions": { "maxNodes": 60 } }
+- Decision mapping: { "vault": "personal", "name": "home-decisions", "template": "decision-analysis", "customOptions": { "rootNotePath": "decisions/main-decisions.md" } }
+- Topic overview: { "vault": "knowledge", "name": "subject-map", "template": "topic-clusters", "customOptions": { "maxNodes": 35 } }`,
+    schema: canvasTemplateSchema,
+    handler: async (args, vaultPath, vaultName) => {
+      const result = await createCanvasFromTemplate(args, vaultPath, vaultName);
+      
+      const response = {
+        success: true,
+        canvas: {
+          name: args.name,
+          template: args.template,
+          path: result.filePath,
+          nodeCount: result.nodeCount,
+          edgeCount: result.edgeCount,
+          layoutUsed: result.layoutUsed,
+          processingTimeMs: result.processingTimeMs
+        },
+        message: `Canvas "${args.name}" created from "${args.template}" template with ${result.nodeCount} nodes and ${result.edgeCount} edges. Processing time: ${result.processingTimeMs.toFixed(1)}ms`
+      };
+      
+      return createToolResponse(JSON.stringify(response, null, 2));
+    }
+  }, vaults);
+}
+
+/**
+ * Create interactive canvas generation MCP tool
+ */
+export function createInteractiveCanvasTool(vaults: Map<string, string>) {
+  const interactiveCanvasSchema = z.object({
+    vault: z.string().min(1, "Vault name cannot be empty"),
+    name: z.string().min(1, "Canvas name cannot be empty"),
+    type: z.enum(['cl-network', 'project-timeline', 'decision-tree', 'topic-map', 'custom']),
+    options: z.object({
+      layoutAlgorithm: z.enum(['force-directed', 'hierarchical', 'circular', 'grid', 'timeline']).optional(),
+      includeStates: z.array(z.enum(['plasma', 'fluid', 'gel', 'crystal'])).optional(),
+      maxNodes: z.number().min(1).max(200).optional(),
+      projectPath: z.string().optional(),
+      rootNotePath: z.string().optional(),
+      colorScheme: z.enum(['cl-states', 'topics', 'confidence']).optional(),
+      spacing: z.number().optional(),
+      canvasWidth: z.number().optional(),
+      canvasHeight: z.number().optional()
+    }).optional(),
+    interactive: z.object({
+      title: z.string().optional(),
+      width: z.number().optional(),
+      height: z.number().optional(),
+      theme: z.enum(['light', 'dark', 'auto']).optional(),
+      enableZoom: z.boolean().optional(),
+      enablePan: z.boolean().optional(),
+      enableDrag: z.boolean().optional(),
+      enablePhysics: z.boolean().optional(),
+      exportFormat: z.enum(['html', 'svg', 'png']).optional()
+    }).optional()
+  }).strict();
+
+  type InteractiveCanvasArgs = z.infer<typeof interactiveCanvasSchema>;
+
+  return createTool<InteractiveCanvasArgs>({
+    name: "canvas_create_interactive",
+    description: `Create interactive D3.js-powered knowledge graph exploration from Obsidian canvas.
+
+Features:
+- Professional D3.js force-directed physics with CL state-based clustering
+- Zoom, pan, and drag interactions for knowledge exploration
+- Real-time physics simulation with intelligent node positioning
+- CL state-based visual hierarchy (crystal center, gel inner, fluid outer, plasma periphery)
+- Node selection and relationship highlighting
+- Interactive controls for physics, zoom, selection, and export
+- Professional theming (light/dark modes)
+- SVG export capabilities
+
+Interactive Options:
+- title: Display title for the knowledge graph
+- width/height: Canvas dimensions (default: 1200x800)
+- theme: 'light', 'dark', or 'auto' theming
+- enableZoom: Enable zoom in/out with mouse wheel and controls
+- enablePan: Enable panning by dragging canvas background
+- enableDrag: Enable dragging individual nodes with physics
+- enablePhysics: Enable real-time force-directed simulation
+- exportFormat: 'html' for interactive, 'svg'/'png' for static export
+
+Examples:
+- Basic interactive: { "vault": "personal", "name": "knowledge-graph", "type": "cl-network", "interactive": { "title": "My Knowledge Graph", "enablePhysics": true } }
+- Full-featured: { "vault": "work", "name": "project-overview", "type": "cl-network", "options": { "maxNodes": 30, "includeStates": ["gel", "crystal"] }, "interactive": { "title": "Project Knowledge", "width": 1400, "height": 900, "theme": "dark", "enableZoom": true, "enablePan": true, "enableDrag": true, "enablePhysics": true } }
+- Export ready: { "vault": "research", "name": "topic-analysis", "type": "topic-map", "interactive": { "title": "Research Overview", "theme": "light", "exportFormat": "svg" } }`,
+    schema: interactiveCanvasSchema,
+    handler: async (args, vaultPath, vaultName) => {
+      const startTime = performance.now();
+      
+      try {
+        const analyzer = new CLCanvasAnalyzer(vaultPath);
+        
+        // Generate base canvas
+        let canvas: ObsidianCanvas;
+        
+        switch (args.type) {
+          case 'cl-network':
+            canvas = await analyzer.generateCLNetworkCanvas({
+              includeStates: args.options?.includeStates || ['fluid', 'gel', 'crystal'],
+              maxNodes: args.options?.maxNodes || 50,
+              layoutAlgorithm: args.options?.layoutAlgorithm || 'force-directed',
+              groupByTopic: true
+            });
+            break;
+            
+          case 'project-timeline':
+            if (!args.options?.projectPath) {
+              throw new Error('Project path required for timeline canvas. Specify options.projectPath');
+            }
+            canvas = await analyzer.generateProjectTimeline(args.options.projectPath);
+            break;
+            
+          case 'decision-tree':
+            if (!args.options?.rootNotePath) {
+              throw new Error('Root note path required for decision tree canvas. Specify options.rootNotePath');
+            }
+            canvas = await analyzer.generateDecisionTree(args.options.rootNotePath);
+            break;
+            
+          case 'topic-map':
+            canvas = await analyzer.generateCLNetworkCanvas({
+              includeStates: args.options?.includeStates || ['gel', 'crystal'],
+              maxNodes: args.options?.maxNodes || 40,
+              layoutAlgorithm: 'circular',
+              groupByTopic: true
+            });
+            break;
+            
+          default:
+            throw new Error(`Canvas type "${args.type}" not yet implemented`);
+        }
+
+        // Generate interactive HTML
+        const interactiveOptions: InteractiveCanvasOptions = {
+          title: args.interactive?.title || `${args.name} - Interactive Knowledge Graph`,
+          width: args.interactive?.width || args.options?.canvasWidth || 1200,
+          height: args.interactive?.height || args.options?.canvasHeight || 800,
+          theme: args.interactive?.theme || 'light',
+          exportFormat: args.interactive?.exportFormat || 'html',
+          interactivity: {
+            enabled: true,
+            zoom: {
+              enabled: args.interactive?.enableZoom !== false,
+              minScale: 0.1,
+              maxScale: 3.0,
+              wheelSensitivity: 1.0,
+              touchSensitivity: 1.0
+            },
+            pan: {
+              enabled: args.interactive?.enablePan !== false,
+              constrainToBounds: false,
+              momentum: true,
+              mousePan: true,
+              touchPan: true
+            },
+            drag: {
+              enabled: args.interactive?.enableDrag !== false,
+              nodes: true,
+              constrainToCanvas: false,
+              snapToGrid: false,
+              gridSize: 20,
+              physics: true
+            },
+            selection: {
+              enabled: true,
+              multiSelect: true,
+              rubberBand: false,
+              keyboardShortcuts: true
+            }
+          },
+          physics: {
+            enabled: args.interactive?.enablePhysics !== false,
+            algorithm: 'force-directed',
+            parameters: {
+              iterations: 300,
+              repulsionStrength: 1000,
+              attractionStrength: 0.1,
+              damping: 0.85
+            },
+            realTime: true
+          }
+        };
+
+        const interactiveHTML = InteractiveCanvasGenerator.generateInteractiveHTML(canvas, interactiveOptions);
+        
+        // Write interactive HTML file
+        const htmlFilename = args.name.endsWith('.html') ? args.name : `${args.name}.html`;
+        const htmlFilePath = path.join(vaultPath, htmlFilename);
+        
+        await fs.writeFile(htmlFilePath, interactiveHTML, 'utf8');
+        
+        const processingTime = performance.now() - startTime;
+        
+        const response = {
+          success: true,
+          canvas: {
+            name: args.name,
+            type: args.type,
+            path: htmlFilePath,
+            nodeCount: canvas.nodes.length,
+            edgeCount: canvas.edges.length,
+            layoutUsed: args.options?.layoutAlgorithm || 'force-directed',
+            processingTimeMs: processingTime,
+            interactive: true,
+            features: {
+              zoom: interactiveOptions.interactivity?.zoom?.enabled || false,
+              pan: interactiveOptions.interactivity?.pan?.enabled || false,
+              drag: interactiveOptions.interactivity?.drag?.enabled || false,
+              physics: interactiveOptions.physics?.enabled || false,
+              theme: interactiveOptions.theme || 'light'
+            }
+          },
+          message: `Interactive canvas "${args.name}" created successfully with ${canvas.nodes.length} nodes and ${canvas.edges.length} edges. Features: ${Object.entries(interactiveOptions.interactivity || {}).filter(([_, config]) => (config as any)?.enabled).map(([name]) => name).join(', ')}. Processing time: ${processingTime.toFixed(1)}ms`
+        };
+        
+        return createToolResponse(JSON.stringify(response, null, 2));
+        
+      } catch (error) {
+        const processingTime = performance.now() - startTime;
+        throw new Error(`Interactive canvas creation failed after ${processingTime.toFixed(1)}ms: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }, vaults);
+}
+
+/**
+ * Create interactive canvas MCP tool with D3.js-style features
+ */
+export function createInteractiveCanvasTool(vaults: Map<string, string>) {
+  return createTool<InteractiveCanvasArgs>({
+    name: "canvas_create_interactive",
+    description: `Create interactive visual Obsidian canvas with D3.js-style zoom, pan, and drag capabilities.
+
+Interactive Features:
+- Professional zoom and pan navigation (0.1x to 3.0x zoom range)
+- Node dragging with physics-aware repositioning
+- Real-time edge updates during node movement
+- Connected node and edge highlighting on hover
+- Keyboard shortcuts (+ zoom in, - zoom out, 0 reset, f fit all)
+- Visual CL state gradients and professional styling
+
+Enhanced Physics:
+- CL state-based force calculations with intelligent clustering
+- Relationship-aware link distances and attraction strengths
+- State compatibility matrix for natural knowledge organization
+- Collision detection with CL state-based node sizing
+- Early convergence optimization for responsive performance
+
+Canvas Types (same as standard canvas):
+- cl-network: Complete knowledge graph with enhanced interactivity
+- project-timeline: Chronological project progression with drag capabilities
+- decision-tree: Interactive decision structures with zoom exploration
+- topic-map: Subject-based clustering with pan and zoom navigation
+
+Interactive Options:
+- enableZoom: Enable mouse wheel zoom (default: true)
+- enablePan: Enable click-drag canvas panning (default: true)  
+- enableDrag: Enable node dragging with physics updates (default: true)
+- zoomExtent: [min, max] zoom levels (default: [0.1, 3.0])
+- initialZoom: Starting zoom level (default: 1.0)
+
+Output:
+- Standard .canvas file for Obsidian compatibility
+- Interactive .html file for browser-based exploration
+- Professional visualization ready for presentations
+
+Examples:
+- Interactive network: { "vault": "personal", "name": "knowledge-interactive", "type": "cl-network", "options": { "layoutAlgorithm": "force-directed", "maxNodes": 30, "enableZoom": true, "enableDrag": true } }
+- Decision exploration: { "vault": "work", "name": "decisions-interactive", "type": "decision-tree", "options": { "rootNotePath": "main-decision.md", "zoomExtent": [0.2, 2.0] } }`,
+    schema: interactiveCanvasSchema,
+    handler: async (args, vaultPath, vaultName) => {
+      const result = await createInteractiveCanvas(args, vaultPath, vaultName);
+      
+      const response = {
+        success: true,
+        canvas: {
+          name: args.name,
+          type: args.type,
+          path: result.filePath,
+          interactiveHtmlPath: result.interactiveHtmlPath,
+          nodeCount: result.nodeCount,
+          edgeCount: result.edgeCount,
+          layoutUsed: result.layoutUsed,
+          processingTimeMs: result.processingTimeMs,
+          interactiveFeatures: {
+            zoom: args.options?.enableZoom ?? true,
+            pan: args.options?.enablePan ?? true,
+            drag: args.options?.enableDrag ?? true,
+            zoomRange: args.options?.zoomExtent || [0.1, 3.0]
+          }
+        },
+        message: `Interactive canvas "${args.name}" created successfully with ${result.nodeCount} nodes and ${result.edgeCount} edges. Canvas file: ${result.filePath}. Interactive HTML: ${result.interactiveHtmlPath}. Processing time: ${result.processingTimeMs.toFixed(1)}ms`
+      };
+      
+      return createToolResponse(JSON.stringify(response, null, 2));
+    }
+  }, vaults);
+}
+
+/**
+ * List available canvas templates
+ */
+export function createCanvasListTemplatesTool() {
+  return {
+    name: "canvas_list_templates",
+    description: "List all available canvas templates with descriptions and use cases",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+      parse: () => ({}),
+      jsonSchema: {
+        type: "object",
+        properties: {},
+        required: []
+      }
+    },
+    handler: async () => {
+      const templates = {
+        "project-dashboard": {
+          name: "Project Dashboard",
+          description: "Comprehensive project overview with timeline, dependencies, and status",
+          includes: "gel and crystal state notes",
+          layout: "hierarchical",
+          maxNodes: 30,
+          useCase: "Project management and status tracking"
+        },
+        "knowledge-exploration": {
+          name: "Knowledge Exploration Map", 
+          description: "Fluid and gel state notes for active research and learning",
+          includes: "fluid and gel state notes",
+          layout: "force-directed",
+          maxNodes: 50,
+          useCase: "Research, learning, and knowledge discovery"
+        },
+        "decision-analysis": {
+          name: "Decision Analysis Framework",
+          description: "Decision trees with outcomes and alternative paths",
+          includes: "all states with decision focus",
+          layout: "hierarchical tree",
+          requirements: "rootNotePath required",
+          useCase: "Decision making and outcome analysis"
+        },
+        "topic-clusters": {
+          name: "Topic Knowledge Clusters",
+          description: "Subject-based knowledge groupings with relationship mapping",
+          includes: "fluid, gel, and crystal states",
+          layout: "circular with topic grouping",
+          maxNodes: 40,
+          useCase: "Subject overview and knowledge organization"
+        }
+      };
+      
+      const response = {
+        templates,
+        totalTemplates: Object.keys(templates).length,
+        usage: "Use canvas_from_template with template name and customOptions to create canvas from template"
+      };
+      
+      return createToolResponse(JSON.stringify(response, null, 2));
+    }
+  };
+}

@@ -1,10 +1,11 @@
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { CLErrorFactory, handleEnhancedZodError } from "./enhanced-errors.js";
 
 /**
- * Wraps common file system errors into McpErrors
+ * Wraps common file system errors into McpErrors with enhanced messaging
  */
-export function handleFsError(error: unknown, operation: string): never {
+export function handleFsError(error: unknown, operation: string, context?: { path?: string; vault?: string }): never {
   if (error instanceof McpError) {
     throw error;
   }
@@ -14,67 +15,70 @@ export function handleFsError(error: unknown, operation: string): never {
     
     switch (nodeError.code) {
       case 'ENOENT':
+        // Enhanced file not found error with CL context
+        if (context?.path && context?.vault) {
+          throw CLErrorFactory.noteNotFoundError(context.path, context.vault);
+        }
         throw new McpError(
           ErrorCode.InvalidRequest,
-          `File or directory not found: ${nodeError.message}`
+          `File or directory not found: ${nodeError.message}. Verify path exists and is accessible within vault boundaries.`
         );
       case 'EACCES':
         throw new McpError(
           ErrorCode.InvalidRequest,
-          `Permission denied: ${nodeError.message}`
+          `Permission denied: ${nodeError.message}. Check file permissions and vault access rights.`
         );
       case 'EEXIST':
+        // Enhanced file exists error with CL context
+        if (context?.path) {
+          throw CLErrorFactory.noteExistsError(context.path);
+        }
         throw new McpError(
           ErrorCode.InvalidRequest,
-          `File or directory already exists: ${nodeError.message}`
+          `File or directory already exists: ${nodeError.message}. Use update operations for existing content.`
         );
       case 'ENOSPC':
         throw new McpError(
           ErrorCode.InternalError,
-          'Not enough space to write file'
+          'Not enough space to write file. Free disk space or reduce content size.'
         );
       default:
         throw new McpError(
           ErrorCode.InternalError,
-          `Failed to ${operation}: ${nodeError.message}`
+          `Failed to ${operation}: ${nodeError.message}. Check system resources and file permissions.`
         );
     }
   }
 
   throw new McpError(
     ErrorCode.InternalError,
-    `Unexpected error during ${operation}`
+    `Unexpected error during ${operation}. Review operation parameters and system state.`
   );
 }
 
 /**
- * Handles Zod validation errors by converting them to McpErrors
+ * Handles Zod validation errors with enhanced CL-specific messaging
  */
-export function handleZodError(error: z.ZodError): never {
-  throw new McpError(
-    ErrorCode.InvalidRequest,
-    `Invalid arguments: ${error.errors.map(e => e.message).join(", ")}`
-  );
+export function handleZodError(error: z.ZodError, operation: string = 'operation'): never {
+  // Use enhanced error handling for better user experience
+  handleEnhancedZodError(error, operation);
 }
 
 /**
- * Creates a standardized error for when a note already exists
+ * Creates an enhanced error for when a note already exists
+ * @deprecated Use CLErrorFactory.noteExistsError for enhanced messaging
  */
 export function createNoteExistsError(path: string): McpError {
-  return new McpError(
-    ErrorCode.InvalidRequest,
-    `A note already exists at: ${path}\n\n` +
-    'To prevent accidental modifications, this operation has been cancelled.\n' +
-    'If you want to modify an existing note, please explicitly request to edit or replace it.'
-  );
+  return CLErrorFactory.noteExistsError(path);
 }
 
 /**
- * Creates a standardized error for when a note is not found
+ * Creates an enhanced error for when a note is not found
+ * @deprecated Use CLErrorFactory.noteNotFoundError for enhanced messaging
  */
-export function createNoteNotFoundError(path: string): McpError {
-  return new McpError(
-    ErrorCode.InvalidRequest,
-    `Note "${path}" not found in vault`
-  );
+export function createNoteNotFoundError(path: string, vault: string = 'vault'): McpError {
+  return CLErrorFactory.noteNotFoundError(path, vault);
 }
+
+// Re-export enhanced error factory for convenience
+export { CLErrorFactory } from "./enhanced-errors.js";
