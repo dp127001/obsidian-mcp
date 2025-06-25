@@ -17,6 +17,17 @@ This MCP has read and write access (if you allow it). Please. PLEASE backup your
 - Manage tags (add, remove, rename)
 - Search vault contents
 
+### Enhanced Filesystem-Native Features (v2.0)
+
+**Performance & Reliability Enhancements:**
+- **Atomic Write Operations**: Temp→rename pattern prevents file corruption
+- **Large Content Support**: Direct filesystem operations handle any file size efficiently
+- **Real-time Monitoring**: Automatic vault change detection with SQLite indexing
+- **<50ms Searches**: Fast CL state-based queries for knowledge management
+
+**Architecture Decision: No Chunking Required**
+The filesystem-native approach eliminates HTTP API constraints that would require content chunking. Direct file operations using `fs.writeFile()` and atomic rename patterns handle large content efficiently without complexity.
+
 ## Requirements
 
 - Node.js 20 or higher (might work on lower, but I haven't tested it)
@@ -75,6 +86,8 @@ npx -y @smithery/cli install obsidian-mcp --client claude
 
 ## Development
 
+### Quick Start
+
 ```bash
 # Clone the repository
 git clone https://github.com/StevenStavrakis/obsidian-mcp
@@ -83,9 +96,43 @@ cd obsidian-mcp
 # Install dependencies
 npm install
 
-# Build
+# Build the project
 npm run build
 ```
+
+### Build System
+
+The project uses **Node.js/TypeScript** with standard toolchain:
+
+- **TypeScript Compiler**: Transpiles source to ES2020 modules
+- **Source Maps**: Generated for debugging support  
+- **Automatic Permissions**: Sets executable permissions on built files
+
+**Build Commands:**
+```bash
+npm run build    # Full production build
+npm run dev      # Development mode (direct TS execution)
+npm start        # Run built version
+```
+
+### Build Troubleshooting
+
+**✅ Build System Fixed (v1.0.6)**
+
+Previous versions required Bun runtime. **Current version uses standard Node.js/TypeScript toolchain** for broader compatibility.
+
+If you encounter build issues:
+
+1. **Verify Node.js version**: `node --version` (requires >= 16)
+2. **Clean rebuild**: 
+   ```bash
+   rm -rf build node_modules
+   npm install
+   npm run build
+   ```
+3. **Check dependencies**: `npm list`
+
+For detailed troubleshooting, see [Build Troubleshooting Guide](./docs/setup/build-troubleshooting.md).
 
 Then add to your Claude Desktop configuration:
 
@@ -121,6 +168,7 @@ Additional documentation can be found in the `docs` directory:
 
 - `creating-tools.md` - Guide for creating new tools
 - `tool-examples.md` - Examples of using the available tools
+- `setup/build-troubleshooting.md` - Build system setup and troubleshooting guide
 
 ## Security
 

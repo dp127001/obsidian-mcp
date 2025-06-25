@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import { handleEnhancedZodError } from "./enhanced-errors.js";
 
 /**
  * Converts a JSON Schema object to a Zod schema
@@ -87,16 +88,14 @@ export function createSchemaHandler<T>(schema: z.ZodSchema<T>) {
       };
     })(),
     
-    // Validate and parse input
-    parse: (input: unknown): T => {
+    // Validate and parse input with enhanced error handling
+    parse: (input: unknown, operation: string = 'operation'): T => {
       try {
         return schema.parse(input);
       } catch (error) {
         if (error instanceof z.ZodError) {
-          throw new McpError(
-            ErrorCode.InvalidParams,
-            `Invalid arguments: ${error.errors.map(e => e.message).join(", ")}`
-          );
+          // Use enhanced error handling for better user experience
+          handleEnhancedZodError(error, operation);
         }
         throw error;
       }

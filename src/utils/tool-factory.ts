@@ -3,6 +3,7 @@ import { Tool } from "../types.js";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { createSchemaHandler } from "./schema.js";
 import { VaultResolver } from "./vault-resolver.js";
+import { CLErrorFactory } from "./errors.js";
 
 export interface BaseToolConfig<T> {
   name: string;
@@ -34,11 +35,23 @@ export function createTool<T extends { vault: string }>(
     inputSchema: schemaHandler || createSchemaHandler(z.object({})),
     handler: async (args) => {
       try {
-        const validated = schemaHandler ? schemaHandler.parse(args) as T : {} as T;
-        const { vaultPath, vaultName } = vaultResolver.resolveVault(validated.vault);
-        return await config.handler(validated, vaultPath, vaultName);
+        // Enhanced schema validation with operation context
+        const validated = schemaHandler ? schemaHandler.parse(args, config.name) as T : {} as T;
+        
+        // Enhanced vault resolution with error context
+        try {
+          const { vaultPath, vaultName } = vaultResolver.resolveVault(validated.vault);
+          return await config.handler(validated, vaultPath, vaultName);
+        } catch (vaultError) {
+          if (vaultError instanceof Error && vaultError.message.includes('not found')) {
+            const availableVaults = Array.from(vaults.keys());
+            throw CLErrorFactory.vaultAccessError(validated.vault, availableVaults);
+          }
+          throw vaultError;
+        }
       } catch (error) {
         if (error instanceof z.ZodError) {
+          // This should now be handled by enhanced schema handler
           throw new McpError(
             ErrorCode.InvalidRequest,
             `Invalid arguments: ${error.errors.map(e => e.message).join(", ")}`
